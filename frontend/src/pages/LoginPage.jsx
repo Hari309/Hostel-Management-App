@@ -2,6 +2,23 @@ import { motion } from "framer-motion";
 import { useState } from "react";
 import { getErrorMessage, loginAdmin } from "../services/api";
 
+const RETRY_ATTEMPTS = 6;
+const RETRY_DELAY_MS = 3000;
+const WAKE_UP_STATUS_CODES = new Set([502, 503, 504]);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isWakeUpError = (error) => {
+  const status = error?.response?.status;
+  if (status && WAKE_UP_STATUS_CODES.has(status)) return true;
+
+  // Preflight/network failures often come through as "no response" from axios.
+  if (!error?.response) return true;
+
+  const text = String(error?.response?.data?.message || error?.message || "").toLowerCase();
+  return text.includes("hibernate") || text.includes("service unavailable");
+};
+
 const LoginPage = ({ onLogin }) => {
   const [email, setEmail] = useState("admin@hostel.com");
   const [password, setPassword] = useState("admin123");
@@ -12,11 +29,31 @@ const LoginPage = ({ onLogin }) => {
     event.preventDefault();
     setError("");
     setLoading(true);
+    let lastError;
+
     try {
-      const response = await loginAdmin({ email, password });
-      onLogin(response);
-    } catch (err) {
-      setError(getErrorMessage(err, "Login failed"));
+      for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt += 1) {
+        try {
+          const response = await loginAdmin({ email, password });
+          onLogin(response);
+          return;
+        } catch (err) {
+          lastError = err;
+
+          if (!isWakeUpError(err) || attempt === RETRY_ATTEMPTS) {
+            break;
+          }
+
+          setError(`Server is waking up... retrying (${attempt}/${RETRY_ATTEMPTS - 1})`);
+          await sleep(RETRY_DELAY_MS);
+        }
+      }
+
+      if (isWakeUpError(lastError)) {
+        setError("Server is waking up on Render. Please wait a few seconds and try again.");
+      } else {
+        setError(getErrorMessage(lastError, "Login failed"));
+      }
     } finally {
       setLoading(false);
     }
